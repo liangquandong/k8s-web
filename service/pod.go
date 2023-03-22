@@ -1,11 +1,14 @@
 package service
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"github.com/wonderivan/logger"
+	"io"
+	"k8s-platform/config"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
@@ -105,7 +108,7 @@ func (p *pod) DeletePod(podName, namespace string) (err error) {
 }
 
 // 更新pod
-func (p *pod) UpdatePod(podName, namespace, content string) (err error) {
+func (p *pod) UpdatePod(namespace, content string) (err error) {
 	var pod = &corev1.Pod{}
 	err = json.Unmarshal([]byte(content), pod)
 	if err != nil {
@@ -128,18 +131,55 @@ func (p *pod) GetPodContainer(podName, namespace string) (containers []string, e
 		return nil, err
 	}
 	for _, container := range pod.Spec.Containers {
-		containers = append(containers, container.Name)
+		containerInfo := container.Name + "：" + container.Image
+		containers = append(containers, containerInfo)
 	}
 	return containers, nil
 }
 
-//获取容器日志
-//func (p *pod) GetPodLog(containerName, podName, namespace string) (log string, err error) {
-//lineLimit :=int64()
-//	return log,nil
-//}
+// 获取容器日志
+func (p *pod) GetPodLog(containerName, podName, namespace string) (log string, err error) {
+	lineLimit := int64(config.PogLogTailLine)
+	option := &corev1.PodLogOptions{
+		Container: containerName,
+		TailLines: &lineLimit,
+	}
+	req := K8s.ClientSet.CoreV1().Pods(namespace).GetLogs(podName, option)
+	podLogs, err := req.Stream(context.TODO())
 
-//获取每个namespace的pod数量
-//func (p *pod) GetPodNumPerNp()(podNps [])  {
+	if err != nil {
+		logger.Error(errors.New("获取PogLog失败，" + err.Error()))
+		return "", errors.New("获取PogLog失败，" + err.Error())
+	}
+	defer podLogs.Close()
+	buf := new(bytes.Buffer)
+	//将podLogs写到buf
+	_, err = io.Copy(buf, podLogs)
+	if err != nil {
+		logger.Error(errors.New("IO.copy失败，" + err.Error()))
+		return "", errors.New("IO.copy失败，" + err.Error())
+	}
+	return buf.String(), nil
 
-//}
+}
+
+// 获取每个namespace的pod数量
+func (p *pod) GetPodNumPerNp() (podNps []*PodsNs, err error) {
+	namespaceList, err := K8s.ClientSet.CoreV1().Namespaces().List(context.TODO(), metav1.ListOptions{})
+	if err != nil {
+		logger.Error(errors.New("获取Namespacesd的pod失败，" + err.Error()))
+		return nil, errors.New("获取Namespacesd的pod失败，" + err.Error())
+	}
+	for _, namespace := range namespaceList.Items {
+		podList, err := K8s.ClientSet.CoreV1().Pods(namespace.Name).List(context.TODO(), metav1.ListOptions{})
+		if err != nil {
+			return nil, err
+		}
+		podNp := &PodsNs{
+			Namespace: namespace.Name,
+			PodNum:    len(podList.Items),
+		}
+		podNps = append(podNps, podNp)
+	}
+	return podNps, nil
+}
